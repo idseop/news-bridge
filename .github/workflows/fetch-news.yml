@@ -1,14 +1,15 @@
 name: fetch-news
 
-# 매일 07:00 KST(22:00 UTC)에 뉴스 RSS를 수집해서 feeds/ 폴더에 날짜별 JSON으로 커밋한다.
+# 매일 07:00 KST(22:00 UTC)에 뉴스 RSS를 수집해서 feeds/ 폴더에 JSON으로 커밋한다.
 # Cowork 예약 작업(08:00 KST)이 raw.githubusercontent.com으로 이 파일을 읽어간다.
+# 파이썬 스크립트를 이 파일 안에 통째로 넣어서 "파일 하나"로 동작하게 했다.
 on:
   schedule:
-    - cron: "0 22 * * *"   # 22:00 UTC = 07:00 KST. GitHub cron은 최대 15~20분 지연될 수 있어 08시 실행 1시간 전으로 잡음
+    - cron: "0 22 * * *"   # 22:00 UTC = 07:00 KST (GitHub cron은 15~20분 지연 가능해 1시간 여유)
   workflow_dispatch: {}      # 수동 실행 버튼(테스트용)
 
 permissions:
-  contents: write            # feeds/ 폴더에 커밋하기 위해 필요
+  contents: write
 
 jobs:
   fetch:
@@ -17,13 +18,66 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Fetch all RSS feeds
-        run: python3 .github/scripts/fetch_feeds.py
+        run: |
+          python3 - <<'PY'
+          import json, sys, time, urllib.request, datetime, pathlib
+          FEEDS = {
+              "전자신문_속보":   "https://rss.etnews.com/Section901.xml",
+              "전자신문_IT":     "https://rss.etnews.com/Section902.xml",
+              "전자신문_산업":   "https://rss.etnews.com/Section903.xml",
+              "AI타임스":        "https://www.aitimes.com/rss/allArticle.xml",
+              "경향_정치":       "https://www.khan.co.kr/rss/rssdata/politic_news.xml",
+              "경향_경제":       "https://www.khan.co.kr/rss/rssdata/economy_news.xml",
+              "이데일리":        "https://rss.edaily.co.kr/edaily_news.xml",
+              "머니투데이":      "https://rss.mt.co.kr/mt_news.xml",
+              "ZDNet코리아":     "https://feeds.feedburner.com/zdkorea",
+              "벤처스퀘어":      "https://www.venturesquare.net/feed",
+              "노컷뉴스":        "https://rss.nocutnews.co.kr/nocutnews.xml",
+              "BBC_Business":    "https://feeds.bbci.co.uk/news/business/rss.xml",
+              "BBC_World":       "https://feeds.bbci.co.uk/news/world/rss.xml",
+              "BBC_Technology":  "https://feeds.bbci.co.uk/news/technology/rss.xml",
+              "TechCrunch":      "https://techcrunch.com/feed/",
+              "NPR":             "https://feeds.npr.org/1001/rss.xml",
+              "AlJazeera":       "https://www.aljazeera.com/xml/rss/all.xml",
+              "Engadget":        "https://www.engadget.com/rss.xml",
+              "HackerNews":      "https://hnrss.org/frontpage",
+              "VentureBeat_AI":  "https://venturebeat.com/category/ai/feed/",
+          }
+          UA = "Mozilla/5.0 (news-bridge; +https://github.com) feed-fetcher"
+          def fetch(url):
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  raw = r.read()
+              for enc in ("utf-8", "euc-kr", "cp949"):
+                  try:
+                      return raw.decode(enc)
+                  except UnicodeDecodeError:
+                      continue
+              return raw.decode("utf-8", errors="replace")
+          today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+          out = {"fetched_utc": datetime.datetime.utcnow().isoformat() + "Z",
+                 "date": today, "feeds": {}, "errors": {}}
+          for name, url in FEEDS.items():
+              for attempt in range(3):
+                  try:
+                      out["feeds"][name] = {"url": url, "xml": fetch(url)}
+                      print("OK   " + name); break
+                  except Exception as e:
+                      if attempt == 2:
+                          out["errors"][name] = f"{type(e).__name__}: {e}"
+                          print(f"FAIL {name}: {e}", file=sys.stderr)
+                      else:
+                          time.sleep(3)
+          d = pathlib.Path("feeds"); d.mkdir(exist_ok=True)
+          (d / f"{today}.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+          (d / "latest.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+          print(f"\nwrote feeds/{today}.json  ({len(out['feeds'])} ok, {len(out['errors'])} fail)")
+          PY
 
       - name: Commit snapshot
         run: |
           git config user.name  "news-bridge-bot"
           git config user.email "actions@users.noreply.github.com"
           git add feeds/
-          # 변경 없으면(주말 등) 실패하지 않게 처리
           git diff --cached --quiet || git commit -m "feeds: $(date -u +%Y-%m-%d)"
           git push
